@@ -94,6 +94,25 @@ async function findSellerRecordIdByCode(sellerCode) {
   return records[0].id;
 }
 
+/**
+ * Build the action row with Claim / Offer buttons.
+ * If disabled=true, both buttons are disabled (dark grey).
+ */
+function buildButtonsRow(disabled = false) {
+  return new ActionRowBuilder().addComponents(
+    new ButtonBuilder()
+      .setCustomId('partner_claim')
+      .setLabel('Claim Deal')
+      .setStyle(ButtonStyle.Success)
+      .setDisabled(disabled),
+    new ButtonBuilder()
+      .setCustomId('partner_offer')
+      .setLabel('Offer')
+      .setStyle(ButtonStyle.Secondary)
+      .setDisabled(disabled)
+  );
+}
+
 /* ---------------- Express HTTP API ---------------- */
 
 const app = express();
@@ -164,20 +183,9 @@ app.post('/partner-deal', async (req, res) => {
       embed.setImage(imageUrl);
     }
 
-    const buttonsRow = new ActionRowBuilder().addComponents(
-      new ButtonBuilder()
-        .setCustomId('partner_claim')
-        .setLabel('Claim Deal')
-        .setStyle(ButtonStyle.Success),
-      new ButtonBuilder()
-        .setCustomId('partner_offer')
-        .setLabel('Offer')
-        .setStyle(ButtonStyle.Secondary)
-    );
-
     const msg = await channel.send({
       embeds: [embed],
-      components: [buttonsRow]
+      components: [buildButtonsRow(false)] // enabled buttons
     });
 
     // Store messageId on the order record, and RESET the "buttons disabled" flag
@@ -209,7 +217,7 @@ app.post('/partner-deal', async (req, res) => {
  *   "recordId": "recXXXXXXXXXXXX"   // Airtable Unfulfilled Orders Log record ID
  * }
  *
- * Called by Make / Airtable automation when Fulfillment Status changes
+ * Called by Airtable automation when Fulfillment Status changes
  * to Allocated, Claim Processing, Cancelled, Store Fulfilled, etc.
  */
 app.post('/partner-deal/disable', async (req, res) => {
@@ -241,10 +249,10 @@ app.post('/partner-deal/disable', async (req, res) => {
       return res.status(404).json({ error: 'Discord message not found.' });
     }
 
-    // 3) Remove buttons
-    await msg.edit({ components: [] });
+    // 3) Disable buttons (keep them visible)
+    await msg.edit({ components: [buildButtonsRow(true)] });
 
-    // 4) Mark as disabled in Airtable (so automation/Make won't re-trigger)
+    // 4) Mark as disabled in Airtable (so automation won't re-trigger)
     try {
       await base(ordersTableName).update(recordId, {
         'Partner Deal Buttons Disabled': true
@@ -281,10 +289,11 @@ client.on(Events.InteractionCreate, async interaction => {
 
         const sellerIdInput = new TextInputBuilder()
           .setCustomId('seller_id')
-          .setLabel('Your Seller Number (digits only)')
+          // visually show SE- so it's clear we add it
+          .setLabel('SE- (fill only the numbers)')
           .setStyle(TextInputStyle.Short)
           .setRequired(true)
-          .setPlaceholder('e.g. 385 (we add SE-)');
+          .setPlaceholder('e.g. 00514');
 
         const row = new ActionRowBuilder().addComponents(sellerIdInput);
         modal.addComponents(row);
@@ -300,10 +309,10 @@ client.on(Events.InteractionCreate, async interaction => {
 
         const sellerIdInput = new TextInputBuilder()
           .setCustomId('seller_id')
-          .setLabel('Your Seller Number (digits only)')
+          .setLabel('SE- (fill only the numbers)')
           .setStyle(TextInputStyle.Short)
           .setRequired(true)
-          .setPlaceholder('e.g. 385 (we add SE-)');
+          .setPlaceholder('e.g. 00514');
 
         const offerInput = new TextInputBuilder()
           .setCustomId('offer_price')
@@ -360,7 +369,7 @@ client.on(Events.InteractionCreate, async interaction => {
 
       if (!/^\d+$/.test(sellerNumberRaw)) {
         return interaction.reply({
-          content: '❌ Seller Number must contain digits only. Please try again.',
+          content: '❌ Seller Number must contain digits only (no SE-, just the digits). Please try again.',
           ephemeral: true
         });
       }
@@ -400,10 +409,10 @@ client.on(Events.InteractionCreate, async interaction => {
         // 1) Create Inventory Unit
         await base(inventoryTableName).create(fields);
 
-        // 2) Disable buttons on the original deal message
+        // 2) Disable buttons (keep visible but grey)
         try {
           if (msg) {
-            await msg.edit({ components: [] });
+            await msg.edit({ components: [buildButtonsRow(true)] });
           }
         } catch (e) {
           console.error('Failed to disable buttons after claim:', e);
