@@ -339,7 +339,7 @@ client.on(Events.InteractionCreate, async interaction => {
 
         // Link to Unfulfilled Orders Log
         if (orderRecordId) {
-          fields['Unfulfilled Orders Log'] = [orderRecordId];
+          fields['Linked Order'] = [orderRecordId];
         }
 
         await base(partnerOffersTableName).create(fields);
