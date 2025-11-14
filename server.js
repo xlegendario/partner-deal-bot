@@ -391,7 +391,7 @@ client.on(Events.InteractionCreate, async interaction => {
           'Size': size,
           'Brand': brand,
           'Purchase Price': startPayout,
-          'Shipping Deduction': '0'
+          'Shipping Deduction': '0',
           'Ticket Number': dealId,
           'Purchase Date': new Date().toISOString().split('T')[0],
           'Source': 'Outsourced',
