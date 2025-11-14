@@ -285,15 +285,14 @@ client.on(Events.InteractionCreate, async interaction => {
       if (interaction.customId === 'partner_claim') {
         const modal = new ModalBuilder()
           .setCustomId(`partner_claim_modal:${messageId}`)
-          .setTitle('Claim Deal');
+          .setTitle('Enter Seller ID'); // matches your screenshot
 
         const sellerIdInput = new TextInputBuilder()
           .setCustomId('seller_id')
-          // visually show SE- so it's clear we add it
-          .setLabel('SE- (fill only the numbers)')
+          .setLabel('Seller ID (e.g. 00001)')  // what they see
           .setStyle(TextInputStyle.Short)
           .setRequired(true)
-          .setPlaceholder('e.g. 00514');
+          .setPlaceholder('00001');            // clean example
 
         const row = new ActionRowBuilder().addComponents(sellerIdInput);
         modal.addComponents(row);
@@ -305,21 +304,21 @@ client.on(Events.InteractionCreate, async interaction => {
       if (interaction.customId === 'partner_offer') {
         const modal = new ModalBuilder()
           .setCustomId(`partner_offer_modal:${messageId}`)
-          .setTitle('Make an Offer');
+          .setTitle('Enter Seller ID & Offer');
 
         const sellerIdInput = new TextInputBuilder()
           .setCustomId('seller_id')
-          .setLabel('SE- (fill only the numbers)')
+          .setLabel('Seller ID (e.g. 00001)')
           .setStyle(TextInputStyle.Short)
           .setRequired(true)
-          .setPlaceholder('e.g. 00514');
+          .setPlaceholder('00001');
 
         const offerInput = new TextInputBuilder()
           .setCustomId('offer_price')
           .setLabel('Your Offer (€)')
           .setStyle(TextInputStyle.Short)
           .setRequired(true)
-          .setPlaceholder('e.g. 140');
+          .setPlaceholder('140');
 
         const row1 = new ActionRowBuilder().addComponents(sellerIdInput);
         const row2 = new ActionRowBuilder().addComponents(offerInput);
@@ -392,9 +391,16 @@ client.on(Events.InteractionCreate, async interaction => {
           'Size': size,
           'Brand': brand,
           'Purchase Price': startPayout,
+          'Shipping Deduction': '0'
           'Ticket Number': dealId,
           'Purchase Date': new Date().toISOString().split('T')[0],
-          'Source': 'Outsourced'
+          'Source': 'Outsourced',
+          'Verification Status': 'Verified',
+          'Payment Note': 'Not Yet Determind',
+          'Payment Status': 'To Pay',
+          'Availability Status': 'Reserved',
+          'Margin %': '10%',
+          'Type': 'Custom'
         };
 
         // Linked Seller ID (linked record)
