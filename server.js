@@ -180,15 +180,17 @@ app.post('/partner-deal', async (req, res) => {
       components: [buttonsRow]
     });
 
-    // Store messageId on the order record, if we have recordId
+    // Store messageId on the order record, and RESET the "buttons disabled" flag
     if (recordId) {
       try {
         await base(ordersTableName).update(recordId, {
-          // create this field in Unfulfilled Orders Log (single line text)
-          'Partner Deal Message ID': msg.id
+          // field in Unfulfilled Orders Log (single line text)
+          'Partner Deal Message ID': msg.id,
+          // checkbox field (false = unchecked)
+          'Partner Deal Buttons Disabled': false
         });
       } catch (e) {
-        console.error('Failed to save Partner Deal Message ID to order record:', e);
+        console.error('Failed to update order record with message ID / reset flag:', e);
       }
     }
 
@@ -241,6 +243,15 @@ app.post('/partner-deal/disable', async (req, res) => {
 
     // 3) Remove buttons
     await msg.edit({ components: [] });
+
+    // 4) Mark as disabled in Airtable (so automation/Make won't re-trigger)
+    try {
+      await base(ordersTableName).update(recordId, {
+        'Partner Deal Buttons Disabled': true
+      });
+    } catch (e) {
+      console.error('Failed to set Partner Deal Buttons Disabled = true:', e);
+    }
 
     return res.json({ ok: true });
   } catch (err) {
@@ -398,7 +409,18 @@ client.on(Events.InteractionCreate, async interaction => {
           console.error('Failed to disable buttons after claim:', e);
         }
 
-        // 3) Reply to the user
+        // 3) Mark "Partner Deal Buttons Disabled" on the order as true (if we know the order)
+        if (orderRecordId) {
+          try {
+            await base(ordersTableName).update(orderRecordId, {
+              'Partner Deal Buttons Disabled': true
+            });
+          } catch (e) {
+            console.error('Failed to set Partner Deal Buttons Disabled = true after claim:', e);
+          }
+        }
+
+        // 4) Reply to the user
         return interaction.reply({
           content: `✅ Deal claimed for **${productName} (${size})**.\nSeller: \`${sellerCode}\``,
           ephemeral: true
