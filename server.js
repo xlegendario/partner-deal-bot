@@ -25,6 +25,7 @@ const {
   AIRTABLE_BASE_ID,
   AIRTABLE_INVENTORY_TABLE,
   AIRTABLE_PARTNER_OFFERS_TABLE,
+  AIRTABLE_SELLERS_TABLE,
   PORT = 10000
 } = process.env;
 
@@ -37,9 +38,9 @@ if (!DISCORD_TOKEN || !DISCORD_DEALS_CHANNEL_ID || !AIRTABLE_API_KEY || !AIRTABL
 
 const base = new Airtable({ apiKey: AIRTABLE_API_KEY }).base(AIRTABLE_BASE_ID);
 
-// Table names can be overridden by envs
 const inventoryTableName = AIRTABLE_INVENTORY_TABLE || 'Inventory Units';
 const partnerOffersTableName = AIRTABLE_PARTNER_OFFERS_TABLE || 'Partner Offers';
+const sellersTableName = AIRTABLE_SELLERS_TABLE || 'Sellers Database';
 
 /* ---------------- Discord ---------------- */
 
@@ -60,14 +61,35 @@ client.login(DISCORD_TOKEN);
 /* ---------------- Helpers ---------------- */
 
 /**
- * Extracts a value from lines like:
+ * Extract value from description lines like:
  *  "**SKU:** 1234"
- * called with label = "**SKU:**"
+ * with label = "**SKU:**"
  */
 function getValueFromLines(lines, label) {
   const line = lines.find(l => l.startsWith(label));
   if (!line) return '';
   return line.split(label)[1].trim();
+}
+
+/**
+ * Find Seller record in Sellers Database by Seller ID (text typed in modal)
+ * Assumes primary / first column in Sellers Database is "Seller ID"
+ */
+async function findSellerRecordIdByCode(sellerCode) {
+  if (!sellerCode) return null;
+
+  const sellersTable = base(sellersTableName);
+
+  const records = await sellersTable
+    .select({
+      maxRecords: 1,
+      // 🔽 adjust "Seller ID" if primary field has another name
+      filterByFormula: `{Seller ID} = "${sellerCode}"`
+    })
+    .firstPage();
+
+  if (!records || records.length === 0) return null;
+  return records[0].id;
 }
 
 /* ---------------- Express HTTP API ---------------- */
@@ -95,8 +117,8 @@ app.get('/health', (_req, res) =>
  *   "brand": "...",
  *   "startPayout": "...",
  *   "imageUrl": "...",
- *   "dealId": "...",
- *   "recordId": "recXXXXXXXXXXXXXX"   // Airtable Order record ID
+ *   "dealId": "...",      // Order ID (human readable)
+ *   "recordId": "rec..."  // Airtable record ID of Unfulfilled Orders Log
  * }
  */
 app.post('/partner-deal', async (req, res) => {
@@ -109,7 +131,7 @@ app.post('/partner-deal', async (req, res) => {
       startPayout,
       imageUrl,
       dealId,
-      recordId // Airtable Order record ID
+      recordId // order record ID from Unfulfilled Orders Log
     } = req.body || {};
 
     if (!productName || !sku || !size || !brand || !startPayout) {
@@ -128,7 +150,7 @@ app.post('/partner-deal', async (req, res) => {
       `**Brand:** ${brand}`,
       `**Start Payout:** €${Number(startPayout).toFixed(2)}`,
       dealId ? `**Deal ID:** ${dealId}` : null,
-      recordId ? `**Order Record ID:** ${recordId}` : null // Store Order record ID for later linking
+      recordId ? `**Order Record ID:** ${recordId}` : null
     ].filter(Boolean);
 
     const embed = new EmbedBuilder()
@@ -256,33 +278,45 @@ client.on(Events.InteractionCreate, async interaction => {
       const dealId = getValueFromLines(lines, '**Deal ID:**') || messageId;
       const orderRecordId = getValueFromLines(lines, '**Order Record ID:**') || null;
 
-      const sellerId = interaction.fields.getTextInputValue('seller_id').trim();
+      const sellerIdText = interaction.fields.getTextInputValue('seller_id').trim();
+
+      // Resolve Seller link (Sellers Database) from typed Seller ID
+      const sellerRecordId = await findSellerRecordIdByCode(sellerIdText);
+      if (!sellerRecordId) {
+        return interaction.reply({
+          content: `❌ Could not find a seller with ID \`${sellerIdText}\` in Sellers Database.`,
+          ephemeral: true
+        });
+      }
 
       /* ---- CLAIM DEAL MODAL ---- */
       if (prefix === 'partner_claim_modal') {
         const fields = {
-          // 🔽 adjust field names below to your actual Airtable fields:
+          // ✔ EXACT mapping for Inventory Units as requested:
           'Product Name': productName,
           'SKU': sku,
           'Size': size,
           'Brand': brand,
           'Purchase Price': startPayout,
-          'Seller ID Text': sellerId,      // e.g. replace with 'Seller ID (Text)' if needed
           'Ticket Number': dealId,
           'Purchase Date': new Date().toISOString().split('T')[0],
-          'Source': 'Partner Deal'
+          'Source': 'Outsourced'
         };
 
-        // Linked Order field (Linked record to Orders table)
-        // Change 'Linked Order' to your actual linked-record field name.
+        // Linked Seller ID (linked record)
+        // 🔽 adjust 'Seller ID' if your linked field has another name
+        fields['Seller ID'] = [sellerRecordId];
+
+        // Link to Unfulfilled Orders Log (linked record)
         if (orderRecordId) {
-          fields['Linked Order'] = [orderRecordId];
+          // 🔽 adjust 'Unfulfilled Orders Log' if linked field differs
+          fields['Unfulfilled Orders Log'] = [orderRecordId];
         }
 
         await base(inventoryTableName).create(fields);
 
         return interaction.reply({
-          content: `✅ Deal claimed for **${productName} (${size})**.\nSeller: \`${sellerId}\``,
+          content: `✅ Deal claimed for **${productName} (${size})**.\nSeller: \`${sellerIdText}\``,
           ephemeral: true
         });
       }
@@ -293,23 +327,19 @@ client.on(Events.InteractionCreate, async interaction => {
         const offerPrice = parseFloat(rawOffer.replace(',', '.') || '0');
 
         const fields = {
-          // 🔽 adjust field names below to your actual Airtable fields:
-          'Product Name': productName,
-          'SKU': sku,
-          'Size': size,
-          'Brand': brand,
-          'Start Payout': startPayout,
-          'Seller ID Text': sellerId,        // e.g. replace with 'Seller ID (Text)' if needed
-          'Seller Offer': offerPrice,
-          'Ticket / Deal ID': dealId,
-          'Source': 'Partner Deal',
-          'Discord Message ID': messageId,
-          'Created At': new Date().toISOString()
+          // ✔ EXACT mapping for Partner Offers as requested:
+          // If you actually want offerPrice instead of startPayout,
+          // you can switch startPayout -> offerPrice here.
+          'Partner Offer': offerPrice, // or startPayout if you prefer
+          'Offer Date': new Date().toISOString().split('T')[0]
         };
 
-        // Same linked order field here
+        // Linked Seller ID (linked record)
+        fields['Seller ID'] = [sellerRecordId];
+
+        // Link to Unfulfilled Orders Log
         if (orderRecordId) {
-          fields['Linked Order'] = [orderRecordId]; // change to your real field name if needed
+          fields['Unfulfilled Orders Log'] = [orderRecordId];
         }
 
         await base(partnerOffersTableName).create(fields);
@@ -317,7 +347,7 @@ client.on(Events.InteractionCreate, async interaction => {
         return interaction.reply({
           content:
             `✅ Offer submitted for **${productName} (${size})**.\n` +
-            `Seller: \`${sellerId}\`\n` +
+            `Seller: \`${sellerIdText}\`\n` +
             `Offer: €${offerPrice.toFixed(2)}`,
           ephemeral: true
         });
