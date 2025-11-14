@@ -26,6 +26,7 @@ const {
   AIRTABLE_INVENTORY_TABLE,
   AIRTABLE_PARTNER_OFFERS_TABLE,
   AIRTABLE_SELLERS_TABLE,
+  AIRTABLE_ORDERS_TABLE,
   PORT = 10000
 } = process.env;
 
@@ -41,6 +42,7 @@ const base = new Airtable({ apiKey: AIRTABLE_API_KEY }).base(AIRTABLE_BASE_ID);
 const inventoryTableName = AIRTABLE_INVENTORY_TABLE || 'Inventory Units';
 const partnerOffersTableName = AIRTABLE_PARTNER_OFFERS_TABLE || 'Partner Offers';
 const sellersTableName = AIRTABLE_SELLERS_TABLE || 'Sellers Database';
+const ordersTableName = AIRTABLE_ORDERS_TABLE || 'Unfulfilled Orders Log';
 
 /* ---------------- Discord ---------------- */
 
@@ -72,7 +74,7 @@ function getValueFromLines(lines, label) {
 }
 
 /**
- * Find Seller record in Sellers Database by Seller ID (text typed in modal)
+ * Find Seller record in Sellers Database by Seller Code (e.g. "SE-00385")
  * Assumes primary / first column in Sellers Database is "Seller ID"
  */
 async function findSellerRecordIdByCode(sellerCode) {
@@ -178,9 +180,71 @@ app.post('/partner-deal', async (req, res) => {
       components: [buttonsRow]
     });
 
+    // Store messageId on the order record, if we have recordId
+    if (recordId) {
+      try {
+        await base(ordersTableName).update(recordId, {
+          // create this field in Unfulfilled Orders Log (single line text)
+          'Partner Deal Message ID': msg.id
+        });
+      } catch (e) {
+        console.error('Failed to save Partner Deal Message ID to order record:', e);
+      }
+    }
+
     return res.json({ ok: true, messageId: msg.id });
   } catch (err) {
     console.error('Error in /partner-deal:', err);
+    return res.status(500).json({ error: 'Internal error.' });
+  }
+});
+
+/**
+ * POST /partner-deal/disable
+ *
+ * Body:
+ * {
+ *   "recordId": "recXXXXXXXXXXXX"   // Airtable Unfulfilled Orders Log record ID
+ * }
+ *
+ * Called by Make / Airtable automation when Fulfillment Status changes
+ * to Allocated, Claim Processing, Cancelled, Store Fulfilled, etc.
+ */
+app.post('/partner-deal/disable', async (req, res) => {
+  try {
+    const { recordId } = req.body || {};
+    if (!recordId) {
+      return res.status(400).json({ error: 'Missing recordId.' });
+    }
+
+    // 1) Load order
+    const orderRecord = await base(ordersTableName).find(recordId);
+    if (!orderRecord) {
+      return res.status(404).json({ error: 'Order record not found.' });
+    }
+
+    const messageId = orderRecord.get('Partner Deal Message ID');
+    if (!messageId) {
+      return res.status(404).json({ error: 'No Partner Deal Message ID stored on order.' });
+    }
+
+    // 2) Fetch channel + message
+    const channel = await client.channels.fetch(DISCORD_DEALS_CHANNEL_ID);
+    if (!channel || !channel.isTextBased()) {
+      return res.status(500).json({ error: 'Deals channel not found or not text-based.' });
+    }
+
+    const msg = await channel.messages.fetch(messageId).catch(() => null);
+    if (!msg) {
+      return res.status(404).json({ error: 'Discord message not found.' });
+    }
+
+    // 3) Remove buttons
+    await msg.edit({ components: [] });
+
+    return res.json({ ok: true });
+  } catch (err) {
+    console.error('Error in /partner-deal/disable:', err);
     return res.status(500).json({ error: 'Internal error.' });
   }
 });
@@ -206,9 +270,10 @@ client.on(Events.InteractionCreate, async interaction => {
 
         const sellerIdInput = new TextInputBuilder()
           .setCustomId('seller_id')
-          .setLabel('Your Seller ID')
+          .setLabel('Your Seller Number (digits only)')
           .setStyle(TextInputStyle.Short)
-          .setRequired(true);
+          .setRequired(true)
+          .setPlaceholder('e.g. 385 (we add SE-)');
 
         const row = new ActionRowBuilder().addComponents(sellerIdInput);
         modal.addComponents(row);
@@ -224,9 +289,10 @@ client.on(Events.InteractionCreate, async interaction => {
 
         const sellerIdInput = new TextInputBuilder()
           .setCustomId('seller_id')
-          .setLabel('Your Seller ID')
+          .setLabel('Your Seller Number (digits only)')
           .setStyle(TextInputStyle.Short)
-          .setRequired(true);
+          .setRequired(true)
+          .setPlaceholder('e.g. 385 (we add SE-)');
 
         const offerInput = new TextInputBuilder()
           .setCustomId('offer_price')
@@ -278,13 +344,21 @@ client.on(Events.InteractionCreate, async interaction => {
       const dealId = getValueFromLines(lines, '**Deal ID:**') || messageId;
       const orderRecordId = getValueFromLines(lines, '**Order Record ID:**') || null;
 
-      const sellerIdText = interaction.fields.getTextInputValue('seller_id').trim();
+      // Seller number (digits only), we will build full code "SE-XXX"
+      const sellerNumberRaw = interaction.fields.getTextInputValue('seller_id').trim();
 
-      // Resolve Seller link (Sellers Database) from typed Seller ID
-      const sellerRecordId = await findSellerRecordIdByCode(sellerIdText);
+      if (!/^\d+$/.test(sellerNumberRaw)) {
+        return interaction.reply({
+          content: '❌ Seller Number must contain digits only. Please try again.',
+          ephemeral: true
+        });
+      }
+
+      const sellerCode = `SE-${sellerNumberRaw}`;
+      const sellerRecordId = await findSellerRecordIdByCode(sellerCode);
       if (!sellerRecordId) {
         return interaction.reply({
-          content: `❌ Could not find a seller with ID \`${sellerIdText}\` in Sellers Database.`,
+          content: `❌ Could not find a seller with ID \`${sellerCode}\` in Sellers Database.`,
           ephemeral: true
         });
       }
@@ -292,7 +366,7 @@ client.on(Events.InteractionCreate, async interaction => {
       /* ---- CLAIM DEAL MODAL ---- */
       if (prefix === 'partner_claim_modal') {
         const fields = {
-          // Inventory Units
+          // Inventory Units mapping:
           'Product Name': productName,
           'SKU': sku,
           'Size': size,
@@ -308,9 +382,7 @@ client.on(Events.InteractionCreate, async interaction => {
 
         // Link to Unfulfilled Orders Log (linked record)
         if (orderRecordId) {
-          // You already renamed this to 'Linked Orders' in Partner Offers;
-          // here I assume Inventory Units still uses 'Unfulfilled Orders Log'.
-          // If not, change this to your exact linked field name.
+          // If your Inventory Units linked field has another name, change it here
           fields['Unfulfilled Orders Log'] = [orderRecordId];
         }
 
@@ -328,11 +400,10 @@ client.on(Events.InteractionCreate, async interaction => {
 
         // 3) Reply to the user
         return interaction.reply({
-          content: `✅ Deal claimed for **${productName} (${size})**.\nSeller: \`${sellerIdText}\``,
+          content: `✅ Deal claimed for **${productName} (${size})**.\nSeller: \`${sellerCode}\``,
           ephemeral: true
         });
       }
-
 
       /* ---- OFFER MODAL ---- */
       if (prefix === 'partner_offer_modal') {
@@ -340,19 +411,17 @@ client.on(Events.InteractionCreate, async interaction => {
         const offerPrice = parseFloat(rawOffer.replace(',', '.') || '0');
 
         const fields = {
-          // ✔ EXACT mapping for Partner Offers as requested:
-          // If you actually want offerPrice instead of startPayout,
-          // you can switch startPayout -> offerPrice here.
-          'Partner Offer': offerPrice, // or startPayout if you prefer
+          // Partner Offers mapping:
+          'Partner Offer': offerPrice, // using the offer the partner typed
           'Offer Date': new Date().toISOString().split('T')[0]
         };
 
         // Linked Seller ID (linked record)
         fields['Seller ID'] = [sellerRecordId];
 
-        // Link to Unfulfilled Orders Log
+        // Link to Orders - field is "Linked Orders" in Partner Offers
         if (orderRecordId) {
-          fields['Linked Order'] = [orderRecordId];
+          fields['Linked Orders'] = [orderRecordId];
         }
 
         await base(partnerOffersTableName).create(fields);
@@ -360,7 +429,7 @@ client.on(Events.InteractionCreate, async interaction => {
         return interaction.reply({
           content:
             `✅ Offer submitted for **${productName} (${size})**.\n` +
-            `Seller: \`${sellerIdText}\`\n` +
+            `Seller: \`${sellerCode}\`\n` +
             `Offer: €${offerPrice.toFixed(2)}`,
           ephemeral: true
         });
