@@ -292,7 +292,7 @@ client.on(Events.InteractionCreate, async interaction => {
       /* ---- CLAIM DEAL MODAL ---- */
       if (prefix === 'partner_claim_modal') {
         const fields = {
-          // ✔ EXACT mapping for Inventory Units as requested:
+          // Inventory Units
           'Product Name': productName,
           'SKU': sku,
           'Size': size,
@@ -304,22 +304,35 @@ client.on(Events.InteractionCreate, async interaction => {
         };
 
         // Linked Seller ID (linked record)
-        // 🔽 adjust 'Seller ID' if your linked field has another name
         fields['Seller ID'] = [sellerRecordId];
 
         // Link to Unfulfilled Orders Log (linked record)
         if (orderRecordId) {
-          // 🔽 adjust 'Unfulfilled Orders Log' if linked field differs
+          // You already renamed this to 'Linked Orders' in Partner Offers;
+          // here I assume Inventory Units still uses 'Unfulfilled Orders Log'.
+          // If not, change this to your exact linked field name.
           fields['Unfulfilled Orders Log'] = [orderRecordId];
         }
 
+        // 1) Create Inventory Unit
         await base(inventoryTableName).create(fields);
 
+        // 2) Disable buttons on the original deal message
+        try {
+          if (msg) {
+            await msg.edit({ components: [] });
+          }
+        } catch (e) {
+          console.error('Failed to disable buttons after claim:', e);
+        }
+
+        // 3) Reply to the user
         return interaction.reply({
           content: `✅ Deal claimed for **${productName} (${size})**.\nSeller: \`${sellerIdText}\``,
           ephemeral: true
         });
       }
+
 
       /* ---- OFFER MODAL ---- */
       if (prefix === 'partner_offer_modal') {
