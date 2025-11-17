@@ -408,7 +408,7 @@ client.on(Events.InteractionCreate, async interaction => {
           'Purchase Date': new Date().toISOString().split('T')[0],
           'Source': 'Outsourced',
           'Verification Status': 'Verified',
-          'Payment Note': 'Not Yet Determind',
+          'Payment Note': startPayout.toFixed(2).replace('.', ','),
           'Payment Status': 'To Pay',
           'Availability Status': 'Reserved',
           'Margin %': '10%',
