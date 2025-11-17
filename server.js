@@ -73,6 +73,19 @@ function getValueFromLines(lines, label) {
   return line.split(label)[1].trim();
 }
 
+async function findOrderRecordIdByMessageId(messageId) {
+  const records = await base(ordersTableName)
+    .select({
+      maxRecords: 1,
+      // field in Unfulfilled Orders Log where we stored the Discord message ID
+      filterByFormula: `{Partner Deal Message ID} = "${messageId}"`
+    })
+    .firstPage();
+
+  return records[0]?.id || null;
+}
+
+
 /**
  * Find Seller record in Sellers Database by Seller Code (e.g. "SE-00385")
  * Assumes primary / first column in Sellers Database is "Seller ID"
@@ -165,13 +178,12 @@ app.post('/partner-deal', async (req, res) => {
     }
 
     const descriptionLines = [
-      `**Product:** ${productName}`,
+      `**Product Name:** ${productName}`,
       `**SKU:** ${sku}`,
       `**Size:** ${size}`,
       `**Brand:** ${brand}`,
-      `**Start Payout:** €${Number(startPayout).toFixed(2)}`,
-      dealId ? `**Deal ID:** ${dealId}` : null,
-      recordId ? `**Order Record ID:** ${recordId}` : null
+      `**Payout:** €${Number(startPayout).toFixed(2)}`,
+      dealId ? `**Order ID:** ${dealId}` : null
     ].filter(Boolean);
 
     const embed = new EmbedBuilder()
@@ -350,18 +362,18 @@ client.on(Events.InteractionCreate, async interaction => {
 
       const lines = embed.description.split('\n');
 
-      const productName = getValueFromLines(lines, '**Product:**');
+      const productName = getValueFromLines(lines, '**Product Name:**');
       const sku = getValueFromLines(lines, '**SKU:**');
       const size = getValueFromLines(lines, '**Size:**');
       const brand = getValueFromLines(lines, '**Brand:**');
       const startPayout = parseFloat(
-        getValueFromLines(lines, '**Start Payout:**')
+        getValueFromLines(lines, '**Payout:**')
           ?.replace('€', '')
           ?.replace(',', '.') || '0'
       );
 
-      const dealId = getValueFromLines(lines, '**Deal ID:**') || messageId;
-      const orderRecordId = getValueFromLines(lines, '**Order Record ID:**') || null;
+      const dealId = getValueFromLines(lines, '**Order ID:**') || messageId;
+      const orderRecordId = await findOrderRecordIdByMessageId(messageId);
 
       // Seller number (digits only), we will build full code "SE-XXX"
       const sellerNumberRaw = interaction.fields.getTextInputValue('seller_id').trim();
@@ -391,7 +403,7 @@ client.on(Events.InteractionCreate, async interaction => {
           'Size': size,
           'Brand': brand,
           'Purchase Price': startPayout,
-          'Shipping Deduction': '0',
+          'Shipping Deduction': 0,
           'Ticket Number': dealId,
           'Purchase Date': new Date().toISOString().split('T')[0],
           'Source': 'Outsourced',
