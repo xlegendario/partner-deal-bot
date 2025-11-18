@@ -286,30 +286,51 @@ client.on(Events.InteractionCreate, async interaction => {
   try {
     /* ---------- BUTTONS ---------- */
     if (interaction.isButton()) {
+      // 🔐 Only handle our own buttons in the deals channel
+      if (
+        interaction.channelId !== DISCORD_DEALS_CHANNEL_ID ||
+        !['partner_claim', 'partner_offer'].includes(interaction.customId)
+      ) {
+        return; // not our channel or not our button -> ignore
+      }
+
       const messageId = interaction.message.id;
       const embed = interaction.message.embeds?.[0];
 
       if (!embed) {
-        return interaction.reply({ content: '❌ No deal embed found.', ephemeral: true });
+        try {
+          await interaction.reply({
+            content: '❌ No deal embed found.',
+            ephemeral: true
+          });
+        } catch (err) {
+          if (err.code === 10062) {
+            console.warn('⚠️ Unknown/expired interaction (no embed), ignoring.');
+          } else {
+            throw err;
+          }
+        }
+        return;
       }
 
       // CLAIM DEAL button
       if (interaction.customId === 'partner_claim') {
         const modal = new ModalBuilder()
           .setCustomId(`partner_claim_modal:${messageId}`)
-          .setTitle('Enter Seller ID'); // matches your screenshot
+          .setTitle('Enter Seller ID');
 
         const sellerIdInput = new TextInputBuilder()
           .setCustomId('seller_id')
-          .setLabel('Seller ID (e.g. 00001)')  // what they see
+          .setLabel('Seller ID (e.g. 00001)')
           .setStyle(TextInputStyle.Short)
           .setRequired(true)
-          .setPlaceholder('00001');            // clean example
+          .setPlaceholder('00001');
 
         const row = new ActionRowBuilder().addComponents(sellerIdInput);
         modal.addComponents(row);
 
-        return interaction.showModal(modal);
+        await interaction.showModal(modal);
+        return;
       }
 
       // OFFER button
@@ -337,27 +358,38 @@ client.on(Events.InteractionCreate, async interaction => {
 
         modal.addComponents(row1, row2);
 
-        return interaction.showModal(modal);
+        await interaction.showModal(modal);
+        return;
       }
     }
 
     /* ---------- MODALS ---------- */
     if (interaction.isModalSubmit()) {
+      // 🔐 Only handle OUR modals, in OUR channel
+      if (
+        interaction.channelId !== DISCORD_DEALS_CHANNEL_ID ||
+        !interaction.customId.startsWith('partner_')
+      ) {
+        return; // modal from the other bot or other channel -> ignore
+      }
+
       const [prefix, messageId] = interaction.customId.split(':');
 
       const channel = interaction.channel;
       if (!channel || !channel.isTextBased()) {
-        return interaction.reply({
+        await interaction.reply({
           content: '❌ Could not find the original deal message.',
           ephemeral: true
         });
+        return;
       }
 
       const msg = await channel.messages.fetch(messageId).catch(() => null);
       const embed = msg?.embeds?.[0];
 
       if (!embed || !embed.description) {
-        return interaction.reply({ content: '❌ Missing deal details.', ephemeral: true });
+        await interaction.reply({ content: '❌ Missing deal details.', ephemeral: true });
+        return;
       }
 
       const lines = embed.description.split('\n');
@@ -379,25 +411,26 @@ client.on(Events.InteractionCreate, async interaction => {
       const sellerNumberRaw = interaction.fields.getTextInputValue('seller_id').trim();
 
       if (!/^\d+$/.test(sellerNumberRaw)) {
-        return interaction.reply({
+        await interaction.reply({
           content: '❌ Seller Number must contain digits only (no SE-, just the digits). Please try again.',
           ephemeral: true
         });
+        return;
       }
 
       const sellerCode = `SE-${sellerNumberRaw}`;
       const sellerRecordId = await findSellerRecordIdByCode(sellerCode);
       if (!sellerRecordId) {
-        return interaction.reply({
+        await interaction.reply({
           content: `❌ Could not find a seller with ID \`${sellerCode}\` in Sellers Database.`,
           ephemeral: true
         });
+        return;
       }
 
       /* ---- CLAIM DEAL MODAL ---- */
       if (prefix === 'partner_claim_modal') {
         const fields = {
-          // Inventory Units mapping:
           'Product Name': productName,
           'SKU': sku,
           'Size': size,
@@ -412,22 +445,16 @@ client.on(Events.InteractionCreate, async interaction => {
           'Payment Status': 'To Pay',
           'Availability Status': 'Reserved',
           'Margin %': '10%',
-          'Type': 'Custom'
+          'Type': 'Custom',
+          'Seller ID': [sellerRecordId]
         };
 
-        // Linked Seller ID (linked record)
-        fields['Seller ID'] = [sellerRecordId];
-
-        // Link to Unfulfilled Orders Log (linked record)
         if (orderRecordId) {
-          // If your Inventory Units linked field has another name, change it here
           fields['Unfulfilled Orders Log'] = [orderRecordId];
         }
 
-        // 1) Create Inventory Unit
         await base(inventoryTableName).create(fields);
 
-        // 2) Disable buttons (keep visible but grey)
         try {
           if (msg) {
             await msg.edit({ components: [buildButtonsRow(true)] });
@@ -436,7 +463,6 @@ client.on(Events.InteractionCreate, async interaction => {
           console.error('Failed to disable buttons after claim:', e);
         }
 
-        // 3) Mark "Partner Deal Buttons Disabled" on the order as true (if we know the order)
         if (orderRecordId) {
           try {
             await base(ordersTableName).update(orderRecordId, {
@@ -447,11 +473,11 @@ client.on(Events.InteractionCreate, async interaction => {
           }
         }
 
-        // 4) Reply to the user
-        return interaction.reply({
+        await interaction.reply({
           content: `✅ Deal claimed for **${productName} (${size})**.\nSeller: \`${sellerCode}\``,
           ephemeral: true
         });
+        return;
       }
 
       /* ---- OFFER MODAL ---- */
@@ -460,38 +486,42 @@ client.on(Events.InteractionCreate, async interaction => {
         const offerPrice = parseFloat(rawOffer.replace(',', '.') || '0');
 
         const fields = {
-          // Partner Offers mapping:
-          'Partner Offer': offerPrice, // using the offer the partner typed
-          'Offer Date': new Date().toISOString().split('T')[0]
+          'Partner Offer': offerPrice,
+          'Offer Date': new Date().toISOString().split('T')[0],
+          'Seller ID': [sellerRecordId]
         };
 
-        // Linked Seller ID (linked record)
-        fields['Seller ID'] = [sellerRecordId];
-
-        // Link to Orders - field is "Linked Orders" in Partner Offers
         if (orderRecordId) {
           fields['Linked Orders'] = [orderRecordId];
         }
 
         await base(partnerOffersTableName).create(fields);
 
-        return interaction.reply({
+        await interaction.reply({
           content:
             `✅ Offer submitted for **${productName} (${size})**.\n` +
             `Seller: \`${sellerCode}\`\n` +
             `Offer: €${offerPrice.toFixed(2)}`,
           ephemeral: true
         });
+        return;
       }
     }
   } catch (err) {
     console.error('Interaction error:', err);
     if (interaction.isRepliable()) {
       try {
-        await interaction.reply({
-          content: '❌ Something went wrong handling this interaction.',
-          ephemeral: true
-        });
+        if (interaction.replied || interaction.deferred) {
+          await interaction.followUp({
+            content: '❌ Something went wrong handling this interaction.',
+            ephemeral: true
+          });
+        } else {
+          await interaction.reply({
+            content: '❌ Something went wrong handling this interaction.',
+            ephemeral: true
+          });
+        }
       } catch (_) {
         // ignore
       }
