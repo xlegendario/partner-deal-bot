@@ -126,6 +126,20 @@ function buildButtonsRow(disabled = false) {
   );
 }
 
+/**
+ * Build an action row with only the Offer button.
+ */
+function buildOfferOnlyRow(disabled = false) {
+  return new ActionRowBuilder().addComponents(
+    new ButtonBuilder()
+      .setCustomId('partner_offer')
+      .setLabel('Offer')
+      .setStyle(ButtonStyle.Secondary)
+      .setDisabled(disabled)
+  );
+}
+
+
 /* ---------------- Express HTTP API ---------------- */
 
 const app = express();
@@ -221,6 +235,70 @@ app.post('/partner-deal', async (req, res) => {
   }
 });
 
+app.post('/partner-offer-deal', async (req, res) => {
+  try {
+    const {
+      productName,
+      sku,
+      size,
+      brand,
+      startPayout,
+      imageUrl,
+      dealId,
+      recordId // order record ID from Unfulfilled Orders Log
+    } = req.body || {};
+
+    if (!productName || !sku || !size || !brand || !startPayout) {
+      return res.status(400).json({ error: 'Missing required fields in payload.' });
+    }
+
+    const channel = await client.channels.fetch(DISCORD_DEALS_CHANNEL_ID);
+    if (!channel || !channel.isTextBased()) {
+      return res.status(500).json({ error: 'Deals channel not found or not text-based.' });
+    }
+
+    const descriptionLines = [
+      `**Product Name:** ${productName}`,
+      `**SKU:** ${sku}`,
+      `**Size:** ${size}`,
+      `**Brand:** ${brand}`,
+      `**Payout:** €${Number(startPayout).toFixed(2)}`,
+      dealId ? `**Order ID:** ${dealId}` : null
+    ].filter(Boolean);
+
+    const embed = new EmbedBuilder()
+      .setTitle('🧨 NEW DEAL (OFFER ONLY) 🧨')
+      .setDescription(descriptionLines.join('\n'))
+      .setColor(0xf1c40f);
+
+    if (imageUrl) {
+      embed.setImage(imageUrl);
+    }
+
+    const msg = await channel.send({
+      embeds: [embed],
+      components: [buildOfferOnlyRow(false)] // only Offer button enabled
+    });
+
+    // Store messageId on the order record, and RESET the "buttons disabled" flag
+    if (recordId) {
+      try {
+        await base(ordersTableName).update(recordId, {
+          'Partner Deal Message ID': msg.id,
+          'Partner Deal Buttons Disabled': false
+        });
+      } catch (e) {
+        console.error('Failed to update order record with message ID / reset flag (offer-only):', e);
+      }
+    }
+
+    return res.json({ ok: true, messageId: msg.id });
+  } catch (err) {
+    console.error('Error in /partner-offer-deal:', err);
+    return res.status(500).json({ error: 'Internal error.' });
+  }
+});
+
 /**
  * POST /partner-deal/disable
  *
@@ -261,8 +339,16 @@ app.post('/partner-deal/disable', async (req, res) => {
       return res.status(404).json({ error: 'Discord message not found.' });
     }
 
-    // 3) Disable buttons (keep them visible)
-    await msg.edit({ components: [buildButtonsRow(true)] });
+    // 3) Disable existing buttons (keep layout as-is: 1 or 2 buttons, etc.)
+    const disabledComponents = msg.components.map(row =>
+      new ActionRowBuilder().addComponents(
+        ...row.components.map(btn =>
+          ButtonBuilder.from(btn).setDisabled(true)
+        )
+      )
+    );
+
+    await msg.edit({ components: disabledComponents });
 
     // 4) Mark as disabled in Airtable (so automation won't re-trigger)
     try {
@@ -279,6 +365,8 @@ app.post('/partner-deal/disable', async (req, res) => {
     return res.status(500).json({ error: 'Internal error.' });
   }
 });
+
+
 
 /* ---------------- Discord Interaction Logic ---------------- */
 
@@ -435,7 +523,7 @@ client.on(Events.InteractionCreate, async interaction => {
           'SKU': sku,
           'Size': size,
           'Brand': brand,
-          'VAT Type': Margin,
+          'VAT Type': 'Margin',
           'Purchase Price': startPayout,
           'Shipping Deduction': 0,
           'Ticket Number': dealId,
@@ -529,6 +617,8 @@ client.on(Events.InteractionCreate, async interaction => {
     }
   }
 });
+
+
 
 /* ---------------- Start HTTP server ---------------- */
 
