@@ -435,6 +435,7 @@ client.on(Events.InteractionCreate, async interaction => {
           'SKU': sku,
           'Size': size,
           'Brand': brand,
+          'VAT Type': Margin,
           'Purchase Price': startPayout,
           'Shipping Deduction': 0,
           'Ticket Number': dealId,
