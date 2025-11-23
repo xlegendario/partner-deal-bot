@@ -138,6 +138,19 @@ function buildButtonsRow(disabled = false) {
 }
 
 /**
+ * Build an action row with only the Offer button.
+ */
+function buildOfferOnlyRow(disabled = false) {
+  return new ActionRowBuilder().addComponents(
+    new ButtonBuilder()
+      .setCustomId('partner_offer')
+      .setLabel('Offer')
+      .setStyle(ButtonStyle.Secondary)
+      .setDisabled(disabled)
+  );
+}
+
+/**
  * Disable all deal messages (in all deal channels) for a given order record ID.
  * Uses the comma-separated "Partner Deal Message ID" field.
  */
@@ -203,18 +216,7 @@ app.get('/health', (_req, res) =>
 
 /**
  * POST /partner-deal
- *
- * Expected payload from Make:
- * {
- *   "productName": "...",
- *   "sku": "...",
- *   "size": "...",
- *   "brand": "...",
- *   "startPayout": "...",
- *   "imageUrl": "...",
- *   "dealId": "...",      // Order ID (human readable)
- *   "recordId": "rec..."  // Airtable record ID of Unfulfilled Orders Log
- * }
+ * → Full Claim + Offer buttons
  */
 app.post('/partner-deal', async (req, res) => {
   try {
@@ -226,7 +228,7 @@ app.post('/partner-deal', async (req, res) => {
       startPayout,
       imageUrl,
       dealId,
-      recordId // order record ID from Unfulfilled Orders Log
+      recordId
     } = req.body || {};
 
     if (!productName || !sku || !size || !brand || !startPayout) {
@@ -253,7 +255,6 @@ app.post('/partner-deal', async (req, res) => {
 
     const messageIds = [];
 
-    // Send to ALL configured deal channels
     for (const channelId of dealsChannelIds) {
       const channel = await client.channels.fetch(channelId).catch(() => null);
       if (!channel || !channel.isTextBased()) {
@@ -263,7 +264,7 @@ app.post('/partner-deal', async (req, res) => {
 
       const msg = await channel.send({
         embeds: [embed],
-        components: [buildButtonsRow(false)] // enabled buttons
+        components: [buildButtonsRow(false)]
       });
 
       messageIds.push(msg.id);
@@ -273,11 +274,10 @@ app.post('/partner-deal', async (req, res) => {
       return res.status(500).json({ error: 'No valid deal channels available.' });
     }
 
-    // Store messageIds (comma-separated) on the order record, and RESET the "buttons disabled" flag
     if (recordId) {
       try {
         await base(ordersTableName).update(recordId, {
-          'Partner Deal Message ID': messageIds.join(','), // e.g. "111,222,333"
+          'Partner Deal Message ID': messageIds.join(','),
           'Partner Deal Buttons Disabled': false
         });
       } catch (e) {
@@ -293,15 +293,85 @@ app.post('/partner-deal', async (req, res) => {
 });
 
 /**
+ * POST /partner-offer-deal
+ * → Offer-only button (no Claim)
+ */
+app.post('/partner-offer-deal', async (req, res) => {
+  try {
+    const {
+      productName,
+      sku,
+      size,
+      brand,
+      startPayout,
+      imageUrl,
+      dealId,
+      recordId
+    } = req.body || {};
+
+    if (!productName || !sku || !size || !brand || !startPayout) {
+      return res.status(400).json({ error: 'Missing required fields in payload.' });
+    }
+
+    const descriptionLines = [
+      `**Product Name:** ${productName}`,
+      `**SKU:** ${sku}`,
+      `**Size:** ${size}`,
+      `**Brand:** ${brand}`,
+      `**Payout:** €${Number(startPayout).toFixed(2)}`,
+      dealId ? `**Order ID:** ${dealId}` : null
+    ].filter(Boolean);
+
+    const embed = new EmbedBuilder()
+      .setTitle('🧨 NEW DEAL (OFFER ONLY) 🧨')
+      .setDescription(descriptionLines.join('\n'))
+      .setColor(0xf1c40f);
+
+    if (imageUrl) {
+      embed.setImage(imageUrl);
+    }
+
+    const messageIds = [];
+
+    for (const channelId of dealsChannelIds) {
+      const channel = await client.channels.fetch(channelId).catch(() => null);
+      if (!channel || !channel.isTextBased()) {
+        console.warn(`⚠️ Deals channel ${channelId} not found or not text-based.`);
+        continue;
+      }
+
+      const msg = await channel.send({
+        embeds: [embed],
+        components: [buildOfferOnlyRow(false)]
+      });
+
+      messageIds.push(msg.id);
+    }
+
+    if (messageIds.length === 0) {
+      return res.status(500).json({ error: 'No valid deal channels available.' });
+    }
+
+    if (recordId) {
+      try {
+        await base(ordersTableName).update(recordId, {
+          'Partner Deal Message ID': messageIds.join(','),
+          'Partner Deal Buttons Disabled': false
+        });
+      } catch (e) {
+        console.error('Failed to update order record with message IDs / reset flag (offer-only):', e);
+      }
+    }
+
+    return res.json({ ok: true, messageIds });
+  } catch (err) {
+    console.error('Error in /partner-offer-deal:', err);
+    return res.status(500).json({ error: 'Internal error.' });
+  }
+});
+
+/**
  * POST /partner-deal/disable
- *
- * Body:
- * {
- *   "recordId": "recXXXXXXXXXXXX"   // Airtable Unfulfilled Orders Log record ID
- * }
- *
- * Called by Airtable automation when Fulfillment Status changes
- * to Allocated, Claim Processing, Cancelled, Store Fulfilled, etc.
  */
 app.post('/partner-deal/disable', async (req, res) => {
   try {
@@ -312,7 +382,6 @@ app.post('/partner-deal/disable', async (req, res) => {
 
     await disableDealMessagesForRecord(recordId);
 
-    // Mark as disabled in Airtable (so automation won't re-trigger)
     try {
       await base(ordersTableName).update(recordId, {
         'Partner Deal Buttons Disabled': true
@@ -334,12 +403,11 @@ client.on(Events.InteractionCreate, async interaction => {
   try {
     /* ---------- BUTTONS ---------- */
     if (interaction.isButton()) {
-      // 🔐 Only handle our own buttons in any of the deals channels
       if (
         !dealsChannelIds.includes(interaction.channelId) ||
         !['partner_claim', 'partner_offer'].includes(interaction.customId)
       ) {
-        return; // not our channel or not our button -> ignore
+        return;
       }
 
       const messageId = interaction.message.id;
@@ -361,7 +429,6 @@ client.on(Events.InteractionCreate, async interaction => {
         return;
       }
 
-      // CLAIM DEAL button
       if (interaction.customId === 'partner_claim') {
         const modal = new ModalBuilder()
           .setCustomId(`partner_claim_modal:${messageId}`)
@@ -381,7 +448,6 @@ client.on(Events.InteractionCreate, async interaction => {
         return;
       }
 
-      // OFFER button
       if (interaction.customId === 'partner_offer') {
         const modal = new ModalBuilder()
           .setCustomId(`partner_offer_modal:${messageId}`)
@@ -413,12 +479,11 @@ client.on(Events.InteractionCreate, async interaction => {
 
     /* ---------- MODALS ---------- */
     if (interaction.isModalSubmit()) {
-      // 🔐 Only handle OUR modals, in any of our deals channels
       if (
         !dealsChannelIds.includes(interaction.channelId) ||
         !interaction.customId.startsWith('partner_')
       ) {
-        return; // modal from the other bot or other channel -> ignore
+        return;
       }
 
       const [prefix, messageId] = interaction.customId.split(':');
@@ -455,7 +520,6 @@ client.on(Events.InteractionCreate, async interaction => {
       const dealId = getValueFromLines(lines, '**Order ID:**') || messageId;
       const orderRecordId = await findOrderRecordIdByMessageId(messageId);
 
-      // Seller number (digits only), we will build full code "SE-XXX"
       const sellerNumberRaw = interaction.fields.getTextInputValue('seller_id').trim();
 
       if (!/^\d+$/.test(sellerNumberRaw)) {
