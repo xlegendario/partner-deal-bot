@@ -2,6 +2,7 @@ import 'dotenv/config';
 import express from 'express';
 import morgan from 'morgan';
 import Airtable from 'airtable';
+import fetch from 'node-fetch';
 import {
   Client,
   GatewayIntentBits,
@@ -116,6 +117,69 @@ async function findSellerRecordIdByCode(sellerCode) {
 
   if (!records || records.length === 0) return null;
   return records[0].id;
+}
+
+/* ---- Seller webhook helpers ---- */
+
+const SELLER_WEBHOOK_FIELD_NAME = 'Discord Webhook URL'; // field in Sellers Database
+
+async function getSellerWebhookUrlByRecordId(sellerRecordId) {
+  if (!sellerRecordId) return null;
+
+  const sellersTable = base(sellersTableName);
+  try {
+    const rec = await sellersTable.find(sellerRecordId);
+    const url = rec.get(SELLER_WEBHOOK_FIELD_NAME);
+    return typeof url === 'string' && url.trim() ? url.trim() : null;
+  } catch (e) {
+    console.error('Failed to read seller webhook URL:', e);
+    return null;
+  }
+}
+
+async function sendSellerClaimWebhook({
+  webhookUrl,
+  productName,
+  sku,
+  size,
+  brand,
+  sellerCode,
+  startPayout,
+  dealId
+}) {
+  if (!webhookUrl) return;
+
+  const embed = {
+    title: '✅ DEAL CONFIRMED ✅',
+    description:
+      `**${productName}**\n` +
+      `${sku}\n` +
+      `${size}\n` +
+      `${brand}`,
+    color: 16776960, // yellow
+    fields: [
+      {
+        name: 'Confirmed Deal Price',
+        value: `€${startPayout.toFixed(2)}`,
+        inline: false
+      }
+    ]
+  };
+
+  const body = {
+    content: `New deal claimed by \`${sellerCode}\`${dealId ? ` • Order ID: \`${dealId}\`` : ''}`,
+    embeds: [embed]
+  };
+
+  try {
+    await fetch(webhookUrl, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body)
+    });
+  } catch (e) {
+    console.error('Failed to send seller claim webhook:', e);
+  }
 }
 
 /**
@@ -567,6 +631,19 @@ client.on(Events.InteractionCreate, async interaction => {
         }
 
         await base(inventoryTableName).create(fields);
+
+        // 🔔 Send seller-specific webhook notification (doesn't affect claim success)
+        const sellerWebhookUrl = await getSellerWebhookUrlByRecordId(sellerRecordId);
+        await sendSellerClaimWebhook({
+          webhookUrl: sellerWebhookUrl,
+          productName,
+          sku,
+          size,
+          brand,
+          sellerCode,
+          startPayout,
+          dealId
+        });
 
         // Disable buttons across all copies for this order
         if (orderRecordId) {
