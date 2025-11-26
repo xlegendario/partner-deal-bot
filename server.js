@@ -50,10 +50,10 @@ if (dealsChannelIds.length === 0) {
 
 const base = new Airtable({ apiKey: AIRTABLE_API_KEY }).base(AIRTABLE_BASE_ID);
 
-const inventoryTableName = AIRTABLE_INVENTORY_TABLE || 'Inventory Units';
-const partnerOffersTableName = AIRTABLE_PARTNER_OFFERS_TABLE || 'Partner Offers';
-const sellersTableName = AIRTABLE_SELLERS_TABLE || 'Sellers Database';
-const ordersTableName = AIRTABLE_ORDERS_TABLE || 'Unfulfilled Orders Log';
+const inventoryTableName      = AIRTABLE_INVENTORY_TABLE       || 'Inventory Units';
+const partnerOffersTableName  = AIRTABLE_PARTNER_OFFERS_TABLE  || 'Partner Offers';
+const sellersTableName        = AIRTABLE_SELLERS_TABLE         || 'Sellers Database';
+const ordersTableName         = AIRTABLE_ORDERS_TABLE          || 'Unfulfilled Orders Log';
 
 /* ---------------- Discord ---------------- */
 
@@ -71,7 +71,22 @@ client.once(Events.ClientReady, c => {
 
 client.login(DISCORD_TOKEN);
 
-/* ---------------- Helpers ---------------- */
+/* ---------------- Constants / Helpers ---------------- */
+
+// Step size for undercutting partner offers
+const MIN_UNDERCUT_STEP = 2.5;
+
+/**
+ * Safely parse a numeric field from Airtable (number or string).
+ */
+function parseNumericField(value) {
+  if (typeof value === 'number') return value;
+  if (typeof value === 'string') {
+    const n = parseFloat(value.replace(',', '.').replace(/[^\d.\-]/g, ''));
+    return Number.isFinite(n) ? n : null;
+  }
+  return null;
+}
 
 /**
  * Extract value from description lines like:
@@ -117,6 +132,56 @@ async function findSellerRecordIdByCode(sellerCode) {
 
   if (!records || records.length === 0) return null;
   return records[0].id;
+}
+
+/**
+ * Get the current lowest Partner Offer for a given order.
+ * Looks at Partner Offers linked to that order and returns the lowest price (number),
+ * or null if no offers exist yet.
+ */
+async function getCurrentLowestPartnerOffer(orderRecordId) {
+  if (!orderRecordId) return null;
+
+  const partnerOffersTable = base(partnerOffersTableName);
+
+  // Fetch all partner offers and filter in JS on Linked Orders
+  const allOffers = await partnerOffersTable.select().all();
+
+  const offersForOrder = allOffers.filter(rec => {
+    const links = rec.get('Linked Orders');
+    if (!Array.isArray(links)) return false;
+
+    return links.some(link => {
+      if (!link) return false;
+
+      // 1) Sometimes Airtable-js returns recordId strings
+      if (typeof link === 'string') {
+        return link === orderRecordId;
+      }
+
+      // 2) Or objects { id, name }
+      if (typeof link === 'object' && 'id' in link) {
+        return link.id === orderRecordId;
+      }
+
+      return false;
+    });
+  });
+
+  console.log('Found', offersForOrder.length, 'partner offers for order', orderRecordId);
+
+  let best = null;
+
+  for (const rec of offersForOrder) {
+    const price = parseNumericField(rec.get('Partner Offer'));
+    if (!Number.isFinite(price)) continue;
+
+    if (best == null || price < best) {
+      best = price;
+    }
+  }
+
+  return best; // number or null
 }
 
 /* ---- Seller webhook helpers ---- */
@@ -572,16 +637,16 @@ client.on(Events.InteractionCreate, async interaction => {
       const lines = embed.description.split('\n');
 
       const productName = getValueFromLines(lines, '**Product Name:**');
-      const sku = getValueFromLines(lines, '**SKU:**');
-      const size = getValueFromLines(lines, '**Size:**');
-      const brand = getValueFromLines(lines, '**Brand:**');
+      const sku         = getValueFromLines(lines, '**SKU:**');
+      const size        = getValueFromLines(lines, '**Size:**');
+      const brand       = getValueFromLines(lines, '**Brand:**');
       const startPayout = parseFloat(
         getValueFromLines(lines, '**Payout:**')
           ?.replace('€', '')
           ?.replace(',', '.') || '0'
       );
 
-      const dealId = getValueFromLines(lines, '**Order ID:**') || messageId;
+      const dealId        = getValueFromLines(lines, '**Order ID:**') || messageId;
       const orderRecordId = await findOrderRecordIdByMessageId(messageId);
 
       const sellerNumberRaw = interaction.fields.getTextInputValue('seller_id').trim();
@@ -594,7 +659,7 @@ client.on(Events.InteractionCreate, async interaction => {
         return;
       }
 
-      const sellerCode = `SE-${sellerNumberRaw}`;
+      const sellerCode     = `SE-${sellerNumberRaw}`;
       const sellerRecordId = await findSellerRecordIdByCode(sellerCode);
       if (!sellerRecordId) {
         await interaction.reply({
@@ -682,8 +747,38 @@ client.on(Events.InteractionCreate, async interaction => {
 
       /* ---- OFFER MODAL ---- */
       if (prefix === 'partner_offer_modal') {
-        const rawOffer = interaction.fields.getTextInputValue('offer_price').trim();
+        const rawOffer   = interaction.fields.getTextInputValue('offer_price').trim();
         const offerPrice = parseFloat(rawOffer.replace(',', '.') || '0');
+
+        if (!Number.isFinite(offerPrice) || offerPrice <= 0) {
+          await interaction.reply({
+            content: '❌ Please enter a valid positive offer amount.',
+            ephemeral: true
+          });
+          return;
+        }
+
+        // 🔻 Enforce undercut vs current lowest partner offer (Margin only)
+        if (orderRecordId) {
+          const lowestExisting = await getCurrentLowestPartnerOffer(orderRecordId);
+
+          if (lowestExisting != null) {
+            const maxAllowed = lowestExisting - MIN_UNDERCUT_STEP;
+
+            if (!(offerPrice <= maxAllowed + 1e-9)) {
+              const refStr = `€${lowestExisting.toFixed(2)}`;
+              const maxStr = `€${maxAllowed.toFixed(2)}`;
+              await interaction.reply({
+                content:
+                  `❌ Your offer is too high.\n` +
+                  `Current lowest offer: **${refStr}**.\n` +
+                  `Your offer must be at least **€${MIN_UNDERCUT_STEP.toFixed(2)}** lower (≤ **${maxStr}**).`,
+                ephemeral: true
+              });
+              return;
+            }
+          }
+        }
 
         const fields = {
           'Partner Offer': offerPrice,
