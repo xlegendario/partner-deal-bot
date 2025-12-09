@@ -28,6 +28,7 @@ const {
   AIRTABLE_PARTNER_OFFERS_TABLE,
   AIRTABLE_SELLERS_TABLE,
   AIRTABLE_ORDERS_TABLE,
+  MAKE_CLAIM_WEBHOOK_URL,      // 🔹 Make webhook URL (optional)
   PORT = 10000
 } = process.env;
 
@@ -244,6 +245,38 @@ async function sendSellerClaimWebhook({
     });
   } catch (e) {
     console.error('Failed to send seller claim webhook:', e);
+  }
+}
+
+/* ---- Make webhook helper ---- */
+
+/**
+ * Notify Make that a deal was claimed.
+ * Sends only the Unfulfilled Orders Log record ID.
+ */
+async function sendMakeClaimMakeWebhook(orderRecordId) {
+  if (!MAKE_CLAIM_WEBHOOK_URL) {
+    // No Make webhook configured – silently skip
+    return;
+  }
+  if (!orderRecordId) {
+    console.warn('⚠️ No orderRecordId provided to sendMakeClaimMakeWebhook, skipping.');
+    return;
+  }
+
+  try {
+    const payload = { orderRecordId };
+
+    const res = await fetch(MAKE_CLAIM_WEBHOOK_URL, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload)
+    });
+
+    const text = await res.text();
+    console.log('Make claim webhook status:', res.status, 'body:', text);
+  } catch (e) {
+    console.error('Failed to send Make claim webhook:', e);
   }
 }
 
@@ -621,6 +654,9 @@ app.post('/interface-claim', async (req, res) => {
       console.error('Failed to disable deal messages / update order flag:', e);
     }
 
+    // 6) Notify Make (if configured)
+    await sendMakeClaimMakeWebhook(orderRecordId);
+
     return res.json({
       ok: true,
       message: `Deal claimed for ${productName || ''} (${size || ''}) – seller ${sellerCode}`
@@ -825,6 +861,9 @@ client.on(Events.InteractionCreate, async interaction => {
           } catch (e) {
             console.error('Failed to globally disable buttons after claim:', e);
           }
+
+          // 🔔 Notify Make for this claimed order
+          await sendMakeClaimMakeWebhook(orderRecordId);
         } else {
           // Fallback: disable only this message
           try {
