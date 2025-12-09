@@ -526,6 +526,111 @@ app.post('/partner-deal/disable', async (req, res) => {
   }
 });
 
+/**
+ * POST /interface-claim
+ * → Claim a deal from Airtable Interface / Automation
+ *
+ * Expected body:
+ * {
+ *   "orderRecordId": "<Airtable record id from Unfulfilled Orders Log>",
+ *   "sellerCode": "SE-00001"
+ * }
+ */
+app.post('/interface-claim', async (req, res) => {
+  try {
+    const { orderRecordId, sellerCode } = req.body || {};
+
+    if (!orderRecordId || !sellerCode) {
+      return res.status(400).json({ error: 'Missing orderRecordId or sellerCode' });
+    }
+
+    // 1) Find seller record
+    const sellerRecordId = await findSellerRecordIdByCode(sellerCode);
+    if (!sellerRecordId) {
+      return res.status(400).json({ error: `No seller found for code ${sellerCode}` });
+    }
+
+    // 2) Load the order from "Unfulfilled Orders Log"
+    let order;
+    try {
+      order = await base(ordersTableName).find(orderRecordId);
+    } catch (e) {
+      console.error('Failed to load order record:', e);
+      return res.status(404).json({ error: 'Order record not found' });
+    }
+
+    // 🔹 Field names from Unfulfilled Orders Log
+    const productName = order.get('Product Name');
+    const sku         = order.get('SKU');
+    const size        = order.get('Size');
+    const brand       = order.get('Brand');
+
+    // 🔹 Payout field (Target Outsource Buying Price)
+    const payoutRaw   = order.get('Target Outsource Buying Price');
+    const startPayout = parseNumericField(payoutRaw);
+    const dealId      = order.get('Order ID') || orderRecordId;
+
+    if (!Number.isFinite(startPayout)) {
+      return res.status(400).json({ error: 'Invalid or missing Target Outsource Buying Price on order record' });
+    }
+
+    // 3) Create Inventory Unit – same as Discord claim logic
+    const fields = {
+      'Product Name': productName,
+      'SKU': sku,
+      'Size': size,
+      'Brand': brand,
+      'VAT Type': 'Margin',
+      'Purchase Price': startPayout,
+      'Shipping Deduction': 0,
+      'Ticket Number': dealId,
+      'Purchase Date': new Date().toISOString().split('T')[0],
+      'Source': 'Outsourced',
+      'Verification Status': 'Verified',
+      'Payment Note': startPayout.toFixed(2).replace('.', ','),
+      'Payment Status': 'To Pay',
+      'Availability Status': 'Reserved',
+      'Margin %': '10%',
+      'Type': 'Custom',
+      'Seller ID': [sellerRecordId],
+      'Unfulfilled Orders Log': [orderRecordId]
+    };
+
+    await base(inventoryTableName).create(fields);
+
+    // 4) Seller webhook
+    const sellerWebhookUrl = await getSellerWebhookUrlByRecordId(sellerRecordId);
+    await sendSellerClaimWebhook({
+      webhookUrl: sellerWebhookUrl,
+      productName,
+      sku,
+      size,
+      brand,
+      sellerCode,
+      startPayout,
+      dealId
+    });
+
+    // 5) Disable Discord buttons for this order
+    try {
+      await disableDealMessagesForRecord(orderRecordId);
+      await base(ordersTableName).update(orderRecordId, {
+        'Partner Deal Buttons Disabled': true
+      });
+    } catch (e) {
+      console.error('Failed to disable deal messages / update order flag:', e);
+    }
+
+    return res.json({
+      ok: true,
+      message: `Deal claimed for ${productName || ''} (${size || ''}) – seller ${sellerCode}`
+    });
+  } catch (err) {
+    console.error('Error in /interface-claim:', err);
+    return res.status(500).json({ error: 'Internal error.' });
+  }
+});
+
 /* ---------------- Discord Interaction Logic ---------------- */
 
 client.on(Events.InteractionCreate, async interaction => {
