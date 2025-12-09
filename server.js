@@ -28,7 +28,7 @@ const {
   AIRTABLE_PARTNER_OFFERS_TABLE,
   AIRTABLE_SELLERS_TABLE,
   AIRTABLE_ORDERS_TABLE,
-  MAKE_CLAIM_WEBHOOK_URL,      // 🔹 Make webhook URL (optional)
+  MAKE_CLAIM_WEBHOOK_URL,      // Make webhook URL (optional)
   PORT = 10000
 } = process.env;
 
@@ -183,6 +183,28 @@ async function getCurrentLowestPartnerOffer(orderRecordId) {
   }
 
   return best; // number or null
+}
+
+/**
+ * Check if an Inventory Unit already exists for a given order + seller.
+ * Avoids double-claiming the same deal (e.g. double clicks).
+ */
+async function inventoryUnitExistsForOrderAndSeller(orderRecordId, sellerRecordId) {
+  if (!orderRecordId || !sellerRecordId) return false;
+
+  const records = await base(inventoryTableName)
+    .select({
+      maxRecords: 1,
+      filterByFormula: `
+        AND(
+          FIND("${orderRecordId}", ARRAYJOIN({Unfulfilled Orders Log} & "")),
+          FIND("${sellerRecordId}", ARRAYJOIN({Seller ID} & ""))
+        )
+      `
+    })
+    .firstPage();
+
+  return records.length > 0;
 }
 
 /* ---- Seller webhook helpers ---- */
@@ -629,7 +651,18 @@ app.post('/interface-claim', async (req, res) => {
       'Unfulfilled Orders Log': [orderRecordId]
     };
 
-    await base(inventoryTableName).create(fields);
+    // 🔒 Safety: avoid double-creation if already claimed for this seller+order
+    const alreadyExists = await inventoryUnitExistsForOrderAndSeller(
+      orderRecordId,
+      sellerRecordId
+    );
+    if (alreadyExists) {
+      console.warn(
+        `⚠️ Inventory unit already exists for order ${orderRecordId} and seller ${sellerRecordId}, skipping creation.`
+      );
+    } else {
+      await base(inventoryTableName).create(fields);
+    }
 
     // 4) Seller webhook
     const sellerWebhookUrl = await getSellerWebhookUrlByRecordId(sellerRecordId);
@@ -834,9 +867,23 @@ client.on(Events.InteractionCreate, async interaction => {
 
         if (orderRecordId) {
           fields['Unfulfilled Orders Log'] = [orderRecordId];
-        }
 
-        await base(inventoryTableName).create(fields);
+          // 🔒 Safety: avoid double-creation if already claimed for this seller+order
+          const alreadyExists = await inventoryUnitExistsForOrderAndSeller(
+            orderRecordId,
+            sellerRecordId
+          );
+          if (alreadyExists) {
+            console.warn(
+              `⚠️ Inventory unit already exists for order ${orderRecordId} and seller ${sellerRecordId}, skipping creation.`
+            );
+          } else {
+            await base(inventoryTableName).create(fields);
+          }
+        } else {
+          // No orderRecordId – we can’t de-duplicate by order, keep old behavior
+          await base(inventoryTableName).create(fields);
+        }
 
         // 🔔 Send seller-specific webhook notification (doesn't affect claim success)
         const sellerWebhookUrl = await getSellerWebhookUrlByRecordId(sellerRecordId);
